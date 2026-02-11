@@ -84,11 +84,23 @@ eta_s = st.sidebar.slider("η_s (short dashpot, ms)", 1.0, 100.0, 20.0, 1.0)
 st.sidebar.subheader("Myosin OFF/ON State")
 k1 = st.sidebar.slider("k₁ (OFF→ON rate, s⁻¹)", 0.1, 5.0, 0.877, 0.01)
 k2 = st.sidebar.slider("k₂ (ON→OFF rate, s⁻¹)", 1.0, 30.0, 12.6, 0.1)
+koffon = st.sidebar.slider(
+    "k_offon (force-feedback gain, Pa⁻¹)", 0.0, 0.01, 0.00144064, 0.0001,
+    format="%.6f",
+    help="Strength of mechano-sensing feedback that stabilises the myosin ON state under load"
+)
 
 # --- Length-dependent activation ---
 st.sidebar.subheader("Length-Dependent Activation")
-beta0 = st.sidebar.slider("β₀ (force-length gain)", -5.0, 5.0, 0.0, 0.1)
-beta1 = st.sidebar.slider("β₁ (Ca-sensitivity shift)", -5.0, 5.0, 0.0, 0.1)
+beta0 = st.sidebar.slider(
+    "β₀ (force-length gain)", -5.0, 5.0, 0.0, 0.1,
+    help="Scales active force magnitude with sarcomere length via the h(λ) function"
+)
+beta1_um = st.sidebar.slider(
+    "β₁ (Ca-sensitivity shift, μM)", -20.0, 20.0, 0.0, 0.5,
+    help="Shifts Ca₅₀ with sarcomere length (in μM). Negative = increased Ca sensitivity at longer SL (physiological LDA)"
+)
+beta1 = beta1_um * 1e-6  # convert μM → M for model
 
 # --- Dynamic experiment settings ---
 st.sidebar.subheader("Dynamic Experiment")
@@ -105,47 +117,50 @@ else:
 # ---------------------------------------------------------------------------
 # Build model with current parameters
 # ---------------------------------------------------------------------------
+def _build_model(Tref, pCa50ref, ntrpn, ku, nTm, kuw, kws, rw, rs,
+                 gs_val, gw_val, phi, Aeff, a_pas, b_pas, k_pas, eta_l, eta_s_ms,
+                 k1, k2, beta0, beta1, koffon):
+    """Construct a Lewalle2024 model and set all parameters directly.
+
+    This avoids the multiplicative PSet approach which breaks for
+    zero-default parameters (beta0, beta1) and misses koffon.
+    """
+    model = Lewalle2024()          # defaults, WhichDep='totalforce'
+    model.Tref = Tref * 1e3        # slider is in kPa, model uses Pa
+    model.pCa50ref = pCa50ref
+    model.ntrpn = ntrpn
+    model.ku = ku
+    model.nTm = nTm
+    model.kuw = kuw
+    model.kws = kws
+    model.rw = rw
+    model.rs = rs
+    model.gs = gs_val
+    model.gw = gw_val
+    model.phi = phi
+    model.Aeff = Aeff
+    model.a = a_pas
+    model.b = b_pas
+    model.k = k_pas
+    model.eta_l = eta_l
+    model.eta_s = eta_s_ms * 1e-3  # slider is in ms, model uses s
+    model.k1 = k1
+    model.k2 = k2
+    model.beta0 = beta0
+    model.beta1 = beta1
+    model.koffon = koffon
+    return model
+
+
 @st.cache_data(show_spinner=False)
 def run_fpca(Tref, pCa50ref, ntrpn, ku, nTm, kuw, kws, rw, rs,
              gs_val, gw_val, phi, Aeff, a_pas, b_pas, k_pas, eta_l, eta_s_ms,
-             k1, k2, beta0, beta1, Lambda_short, Lambda_long, SL0):
+             k1, k2, beta0, beta1, koffon, Lambda_short, Lambda_long, SL0):
     """Compute steady-state F-pCa curves for two sarcomere lengths."""
-    PSet = pd.Series({
-        'Tref': Tref / 23.0,
-        'pCa50ref': pCa50ref / 5.25,
-        'ntrpn': ntrpn / 2.58,
-        'ku': ku / 1000.0,
-        'nTm': nTm / 2.2,
-        'kuw': kuw / 4.98,
-        'kws': kws / 19.10,
-        'rw': rw / 0.5,
-        'rs': rs / 0.25,
-        'gs': gs_val / 42.1,
-        'gw': gw_val / 28.3,
-        'phi': phi / 0.1498,
-        'Aeff': Aeff / 125.0,
-        'a': a_pas / 241.0,
-        'b': b_pas / 9.1,
-        'k': k_pas / 8.86,
-        'eta_l': eta_l / 0.2,
-        'eta_s': (eta_s_ms * 1e-3) / 20e-3,
-        'k1': k1 / 0.877,
-        'k2': k2 / 12.6,
-        'beta0': 1.0 if beta0 == 0.0 else beta0 / 0.0,  # handled below
-        'beta1': 1.0 if beta1 == 0.0 else beta1 / 0.0,   # handled below
-    })
-
-    # beta0/beta1 defaults are 0, so multiplicative scaling doesn't work.
-    # We override directly after construction.
-    # Set them to 1.0 in PSet so the constructor doesn't break.
-    PSet['beta0'] = 1.0
-    PSet['beta1'] = 1.0
-
-    model = Lewalle2024(PSet1=PSet)
+    model = _build_model(Tref, pCa50ref, ntrpn, ku, nTm, kuw, kws, rw, rs,
+                         gs_val, gw_val, phi, Aeff, a_pas, b_pas, k_pas,
+                         eta_l, eta_s_ms, k1, k2, beta0, beta1, koffon)
     model.SL0 = SL0
-    # Override beta0, beta1 directly (additive, not multiplicative)
-    model.beta0 = beta0
-    model.beta1 = beta1
 
     pCa_list = np.linspace(7.0, 4.0, 80)
 
@@ -178,21 +193,11 @@ def run_fpca(Tref, pCa50ref, ntrpn, ku, nTm, kuw, kws, rw, rs,
 @st.cache_data(show_spinner=False)
 def run_dynamic_step(Tref, pCa50ref, ntrpn, ku, nTm, kuw, kws, rw, rs,
                      gs_val, gw_val, phi, Aeff, a_pas, b_pas, k_pas, eta_l, eta_s_ms,
-                     k1, k2, beta0, beta1, pCa_value, DLambda_step, t_duration):
+                     k1, k2, beta0, beta1, koffon, pCa_value, DLambda_step, t_duration):
     """Run a step-length-change dynamic simulation."""
-    PSet = pd.Series({
-        'Tref': Tref / 23.0, 'pCa50ref': pCa50ref / 5.25,
-        'ntrpn': ntrpn / 2.58, 'ku': ku / 1000.0, 'nTm': nTm / 2.2,
-        'kuw': kuw / 4.98, 'kws': kws / 19.10, 'rw': rw / 0.5, 'rs': rs / 0.25,
-        'gs': gs_val / 42.1, 'gw': gw_val / 28.3, 'phi': phi / 0.1498,
-        'Aeff': Aeff / 125.0, 'a': a_pas / 241.0, 'b': b_pas / 9.1,
-        'k': k_pas / 8.86, 'eta_l': eta_l / 0.2, 'eta_s': (eta_s_ms * 1e-3) / 20e-3,
-        'k1': k1 / 0.877, 'k2': k2 / 12.6,
-        'beta0': 1.0, 'beta1': 1.0,
-    })
-    model = Lewalle2024(PSet1=PSet)
-    model.beta0 = beta0
-    model.beta1 = beta1
+    model = _build_model(Tref, pCa50ref, ntrpn, ku, nTm, kuw, kws, rw, rs,
+                         gs_val, gw_val, phi, Aeff, a_pas, b_pas, k_pas,
+                         eta_l, eta_s_ms, k1, k2, beta0, beta1, koffon)
     model.pCai = lambda t: pCa_value
     model.Lambda_ext = 1.0
 
@@ -221,21 +226,11 @@ def run_dynamic_step(Tref, pCa50ref, ntrpn, ku, nTm, kuw, kws, rw, rs,
 @st.cache_data(show_spinner=False)
 def run_dynamic_sin(Tref, pCa50ref, ntrpn, ku, nTm, kuw, kws, rw, rs,
                     gs_val, gw_val, phi, Aeff, a_pas, b_pas, k_pas, eta_l, eta_s_ms,
-                    k1, k2, beta0, beta1, pCa_value, freq, n_cycles, amp):
+                    k1, k2, beta0, beta1, koffon, pCa_value, freq, n_cycles, amp):
     """Run a sinusoidal-oscillation dynamic simulation."""
-    PSet = pd.Series({
-        'Tref': Tref / 23.0, 'pCa50ref': pCa50ref / 5.25,
-        'ntrpn': ntrpn / 2.58, 'ku': ku / 1000.0, 'nTm': nTm / 2.2,
-        'kuw': kuw / 4.98, 'kws': kws / 19.10, 'rw': rw / 0.5, 'rs': rs / 0.25,
-        'gs': gs_val / 42.1, 'gw': gw_val / 28.3, 'phi': phi / 0.1498,
-        'Aeff': Aeff / 125.0, 'a': a_pas / 241.0, 'b': b_pas / 9.1,
-        'k': k_pas / 8.86, 'eta_l': eta_l / 0.2, 'eta_s': (eta_s_ms * 1e-3) / 20e-3,
-        'k1': k1 / 0.877, 'k2': k2 / 12.6,
-        'beta0': 1.0, 'beta1': 1.0,
-    })
-    model = Lewalle2024(PSet1=PSet)
-    model.beta0 = beta0
-    model.beta1 = beta1
+    model = _build_model(Tref, pCa50ref, ntrpn, ku, nTm, kuw, kws, rw, rs,
+                         gs_val, gw_val, phi, Aeff, a_pas, b_pas, k_pas,
+                         eta_l, eta_s_ms, k1, k2, beta0, beta1, koffon)
     model.pCai = lambda t: pCa_value
     model.Lambda_ext = 1.0
 
@@ -262,17 +257,17 @@ def run_dynamic_sin(Tref, pCa50ref, ntrpn, ku, nTm, kuw, kws, rw, rs,
 with st.spinner("Computing steady-state F-pCa..."):
     fpca = run_fpca(Tref, pCa50ref, ntrpn, ku, nTm, kuw, kws, rw, rs,
                     gs_val, gw_val, phi, Aeff, a_pas, b_pas, k_pas, eta_l, eta_s,
-                    k1, k2, beta0, beta1, Lambda_short, Lambda_long, SL0)
+                    k1, k2, beta0, beta1, koffon, Lambda_short, Lambda_long, SL0)
 
 with st.spinner("Computing dynamic response..."):
     if exp_type == "Step length change":
         dyn = run_dynamic_step(Tref, pCa50ref, ntrpn, ku, nTm, kuw, kws, rw, rs,
                                gs_val, gw_val, phi, Aeff, a_pas, b_pas, k_pas, eta_l, eta_s,
-                               k1, k2, beta0, beta1, pCa_value, DLambda_step, t_duration)
+                               k1, k2, beta0, beta1, koffon, pCa_value, DLambda_step, t_duration)
     else:
         dyn = run_dynamic_sin(Tref, pCa50ref, ntrpn, ku, nTm, kuw, kws, rw, rs,
                               gs_val, gw_val, phi, Aeff, a_pas, b_pas, k_pas, eta_l, eta_s,
-                              k1, k2, beta0, beta1, pCa_value, freq, n_cycles, amp)
+                              k1, k2, beta0, beta1, koffon, pCa_value, freq, n_cycles, amp)
 
 
 # ---------------------------------------------------------------------------
@@ -525,7 +520,8 @@ This model describes the mechanics of cardiac muscle at the sarcomere level, cou
 
 **Myosin thick filament regulation**:
 - OFF/ON state transition (k₁, k₂) with force-dependent feedback
-- Mechano-sensing stabilises the ON state under load
+- **k_offon** controls the strength of mechano-sensing feedback that stabilises the ON state under load
+- Higher k_offon → stronger force-dependent recruitment of myosin heads
 
 **Length-dependent activation (LDA)**:
 - Longer sarcomeres → increased calcium sensitivity (β₁) and force (β₀)
